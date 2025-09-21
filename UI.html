@@ -1,0 +1,531 @@
+﻿<div id="wp-co-nd-host"></div>
+
+<script>
+    (function () {
+        /* 核心配置项 */
+        const CFG = {
+            api: 'https://127.0.0.1/WeatherForecast/lastws',//请求数据地址
+            poll: 3000,
+            offlineSec: 30,
+            debug: true
+        };
+
+        /* 元素ID定义 */
+        const IDS = {
+            container: 'wp-co-nd-host',
+            wrapper: 'wp-co-nd-wrapper',
+            grid: 'wp-co-nd-grid',
+            status: 'wp-co-nd-status',
+            error: 'wp-co-nd-error',
+            warning: 'wp-co-nd-warning'
+        };
+
+        /* 状态管理变量 */
+        let servers = [];
+        let isLoading = false;
+
+        /* ===================== 工具函数 ===================== */
+        function getSafe(obj, path, defaultValue = null, logMissing = true) {
+            const result = path.split('.').reduce((acc, part) => {
+                if (acc === null || acc === undefined) return defaultValue;
+                return acc[part] !== undefined ? acc[part] : defaultValue;
+            }, obj);
+            if (result === defaultValue && logMissing && CFG.debug) {
+                console.log(`[服务器监控] 缺失字段: ${path}`);
+            }
+            return result;
+        }
+
+        function formatPercent(used, total) {
+            if (total <= 0) return "0.0%";
+            const pct = Math.min(100, Math.max(0, (used / total) * 100));
+            return pct.toFixed(1) + "%";
+        }
+        function formatBytesToGB(bytes) {
+            if (bytes === null || isNaN(bytes)) return "未知";
+            const gb = bytes / (1024 * 1024 * 1024);
+            return gb >= 1 ? `${gb.toFixed(2)}GB` : `${(gb * 1024).toFixed(1)}MB`;
+        }
+        function formatSpeed(bytes) {
+            if (bytes === null || isNaN(bytes)) return "未知";
+            if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)}MB/s`;
+            if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)}KB/s`;
+            return `${bytes}B/s`;
+        }
+        function formatTraffic(bytes) {
+            if (bytes === null || isNaN(bytes)) return "未知";
+            const gb = bytes / (1024 * 1024 * 1024);
+            return gb >= 1 ? `${gb.toFixed(2)}GB` : `${(gb * 1024).toFixed(1)}MB`;
+        }
+        function formatUptime(seconds) {
+            if (seconds === null || isNaN(seconds)) return "未知";
+            if (seconds < 60) return `${seconds}秒`;
+            if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟`;
+            if (seconds < 86400) return `${(seconds / 3600).toFixed(1)}小时`;
+            return `${(seconds / 86400).toFixed(1)}天`;
+        }
+        function formatCountryCode(code) {
+            if (!code) return "未知地区";
+            const regionMap = { 'hk': '中国香港', 'cn': '中国大陆' };
+            return regionMap[code] || code;
+        }
+        function formatCpuInfo(cpuArr) {
+            return cpuArr && cpuArr.length > 0 ? cpuArr.join(' | ') : "未知CPU信息";
+        }
+        function getStatusColor(cpu) {
+            if (cpu === null || isNaN(cpu)) return "#a0aec0";
+            if (cpu > 85) return "#e53e3e";
+            if (cpu > 70) return "#ed8936";
+            if (cpu > 40) return "#ecc94b";
+            return "#48bb78";
+        }
+        function isServerOnline(server) {
+            const lastActive = getSafe(server, 'last_active');
+            if (!lastActive) return false;
+            const lastActiveTime = new Date(lastActive).getTime();
+            return (Date.now() - lastActiveTime) < CFG.offlineSec * 1000;
+        }
+
+        /* ===================== 样式注入 ===================== */
+        function injectStyles() {
+            const oldStyle = document.getElementById('wp-co-nd-styles');
+            if (oldStyle) oldStyle.remove();
+
+            const style = document.createElement('style');
+            style.id = 'wp-co-nd-styles';
+            style.textContent = `
+            #${IDS.wrapper} {
+                width: 100% !important;
+                box-sizing: border-box !important;
+                padding: 15px !important;
+                font-family: "Microsoft YaHei", Arial, sans-serif !important;
+                max-width: 1400px !important;
+                margin: 0 auto !important;
+            }
+
+            #${IDS.grid} {
+                display: grid !important;
+                grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)) !important;
+                gap: 18px !important;
+                margin-top: 18px !important;
+            }
+
+            .wp-co-server-card {
+                border: 1px solid #e2e8f0 !important;
+                border-radius: 10px !important;
+                padding: 18px !important;
+                box-shadow: 0 3px 8px rgba(0,0,0,0.06) !important;
+                transition: box-shadow 0.2s ease !important;
+            }
+            .wp-co-server-card:hover {
+                box-shadow: 0 5px 15px rgba(0,0,0,0.08) !important;
+            }
+            .wp-co-server-card.offline {
+                opacity: 0.72 !important;
+                filter: grayscale(0.8) !important;
+            }
+
+            .wp-co-status-indicator {
+                display: inline-block !important;
+                width: 12px !important;
+                height: 12px !important;
+                border-radius: 50% !important;
+                margin-right: 8px !important;
+                vertical-align: middle !important;
+            }
+
+            .wp-co-server-header {
+                display: flex !important;
+                justify-content: space-between !important;
+                align-items: center !important;
+                margin-bottom: 15px !important;
+            }
+
+            .wp-co-server-name {
+                font-weight: 600 !important;
+                font-size: 16px !important;
+            }
+
+            .wp-co-server-region {
+                font-size: 12px !important;
+                padding: 3px 8px !important;
+                border-radius: 12px !important;
+                border: 1px solid #e2e8f0 !important;
+            }
+
+            .wp-co-cpu-container {
+                margin-bottom: 15px !important;
+            }
+
+            .wp-co-cpu-label {
+                display: flex !important;
+                justify-content: space-between !important;
+                font-size: 13px !important;
+                margin-bottom: 4px !important;
+            }
+
+            .wp-co-cpu-bar-wrap {
+                height: 6px !important;
+                border-radius: 3px !important;
+                overflow: hidden !important;
+                border: 1px solid #e2e8f0 !important;
+            }
+
+            .wp-co-cpu-bar {
+                height: 100% !important;
+                transition: width 1s ease !important;
+            }
+
+            .wp-co-section-title {
+                font-size: 14px !important;
+                font-weight: 500 !important;
+                margin: 12px 0 6px 0 !important;
+                padding-left: 4px !important;
+                border-left: 2px solid #4299e1 !important;
+            }
+
+            .wp-co-info-grid {
+                display: grid !important;
+                grid-template-columns: 1fr 1fr !important;
+                gap: 8px !important;
+                font-size: 13px !important;
+            }
+
+            .wp-co-info-item {
+                display: flex !important;
+                flex-direction: column !important;
+            }
+
+            .wp-co-info-label {
+                font-size: 12px !important;
+                margin-bottom: 2px !important;
+                opacity: 0.8 !important;
+            }
+
+            .wp-co-footer-stats {
+                display: flex !important;
+                justify-content: space-between !important;
+                margin-top: 12px !important;
+                font-size: 13px !important;
+                flex-wrap: wrap !important;
+            }
+
+            #${IDS.status} {
+                font-size: 13px !important;
+                display: flex !important;
+                align-items: center !important;
+                gap: 4px !important;
+            }
+
+            #${IDS.error}, #${IDS.warning} {
+                margin-top: 15px !important;
+                padding: 10px 12px !important;
+                border-radius: 6px !important;
+                font-size: 13px !important;
+                display: none !important;
+                align-items: center !important;
+                gap: 6px !important;
+            }
+
+            #${IDS.error} {
+                border: 1px solid #ffe3e3 !important;
+            }
+            #${IDS.warning} {
+                border: 1px solid #ffeaa7 !important;
+            }
+
+            .wp-co-header {
+                display: flex !important;
+                justify-content: space-between !important;
+                align-items: center !important;
+            }
+
+            .wp-co-page-title {
+                font-size: 18px !important;
+                font-weight: 600 !important;
+                display: flex !important;
+                align-items: center !important;
+                gap: 8px !important;
+            }
+
+            .wp-co-unknown-data {
+                font-style: italic !important;
+                opacity: 0.7 !important;
+            }
+        `;
+            document.head.appendChild(style);
+        }
+
+        /* ===================== 结构创建 ===================== */
+        function createBaseStructure() {
+            const container = document.getElementById(IDS.container);
+            if (!container) {
+                console.error("[服务器监控] 容器元素不存在");
+                return false;
+            }
+
+            container.innerHTML = `
+            <div id="${IDS.wrapper}">
+                <div class="wp-co-header">
+                    <div class="wp-co-page-title">
+                        <i class="fa fa-server"></i>
+                        服务器状态监控
+                    </div>
+                    <div id="${IDS.status}">
+                        <i class="fa fa-refresh fa-spin"></i>
+                        加载中...
+                    </div>
+                </div>
+
+                <div id="${IDS.grid}">
+                    <div style="grid-column: 1 / -1; text-align: center; padding: 40px 0; font-size: 14px;">
+                        <i class="fa fa-spinner fa-spin" style="font-size: 20px; margin-bottom: 8px;"></i>
+                        <p>正在获取服务器数据...</p>
+                    </div>
+                </div>
+
+                <div id="${IDS.error}">
+                    <i class="fa fa-exclamation-circle"></i>
+                    <span>获取数据失败，请稍后重试</span>
+                </div>
+
+                <div id="${IDS.warning}">
+                    <i class="fa fa-exclamation-triangle"></i>
+                    <span>部分数据加载异常，详情请查看控制台</span>
+                </div>
+            </div>
+        `;
+            return true;
+        }
+
+        /* ===================== 提示控制函数 ===================== */
+        function showError(show) {
+            const errorEl = document.getElementById(IDS.error);
+            if (errorEl) errorEl.style.display = show ? 'flex' : 'none';
+        }
+        function showWarning(show) {
+            const warningEl = document.getElementById(IDS.warning);
+            if (warningEl) warningEl.style.display = show ? 'flex' : 'none';
+        }
+
+        /* ===================== 数据渲染 ===================== */
+        function renderServers() {
+            const grid = document.getElementById(IDS.grid);
+            const statusEl = document.getElementById(IDS.status);
+            if (!grid || !statusEl) return;
+
+            const now = new Date();
+            statusEl.innerHTML = `
+            <i class="fa fa-clock-o"></i>
+            最后更新: ${now.toLocaleTimeString()}
+        `;
+
+            let hasMissingData = false;
+
+            if (servers.length === 0) {
+                showError(true);
+                showWarning(false);
+                grid.innerHTML = `
+                <div style="grid-column: 1 / -1; text-align: center; padding: 40px 0; font-size: 14px;">
+                    <i class="fa fa-folder-open-o" style="font-size: 20px; margin-bottom: 8px;"></i>
+                    <p>暂无服务器数据</p>
+                </div>
+            `;
+            } else {
+                showError(false);
+                if (CFG.debug) console.log(`[服务器监控] 渲染 ${servers.length} 台服务器数据`);
+
+                grid.innerHTML = servers.map((server, index) => {
+                    const serverName = getSafe(server, 'name', `未命名服务器 #${index + 1}`);
+                    if (CFG.debug) console.log(`[服务器监控] 处理服务器: ${serverName}`);
+
+                    const online = isServerOnline(server);
+                    const cpuUsed = getSafe(server, 'state.cpu', 0);
+                    const cpuUsage = parseFloat(formatPercent(cpuUsed, 100));
+                    const memUsed = getSafe(server, 'state.mem_used', 0);
+                    const memTotal = getSafe(server, 'host.mem_total', 0);
+                    const memUsage = formatPercent(memUsed, memTotal);
+                    const diskUsed = getSafe(server, 'state.disk_used', 0);
+                    const diskTotalVal = getSafe(server, 'host.disk_total', 0);
+                    const diskUsage = formatPercent(diskUsed, diskTotalVal);
+                    const statusColor = getStatusColor(cpuUsage);
+
+                    const os = getSafe(server, 'host.platform', "未知系统");
+                    const cpu = formatCpuInfo(getSafe(server, 'host.cpu', []));
+                    const arch = getSafe(server, 'host.arch', "未知架构");
+                    const region = formatCountryCode(getSafe(server, 'country_code'));
+                    const uptime = formatUptime(getSafe(server, 'state.uptime'));
+
+                    const netIn = formatSpeed(getSafe(server, 'state.net_in_speed'));
+                    const netOut = formatSpeed(getSafe(server, 'state.net_out_speed'));
+                    const trafficIn = formatTraffic(getSafe(server, 'state.net_in_transfer'));
+                    const trafficOut = formatTraffic(getSafe(server, 'state.net_out_transfer'));
+                    const tcpConn = getSafe(server, 'state.tcp_conn_count', "未知");
+                    const processCount = getSafe(server, 'state.process_count', "未知");
+
+                    const serverHasMissingData = [
+                        os === "未知系统",
+                        cpu === "未知CPU信息",
+                        arch === "未知架构",
+                        tcpConn === "未知",
+                        uptime === "未知",
+                        processCount === "未知"
+                    ].some(Boolean);
+
+                    if (serverHasMissingData) {
+                        hasMissingData = true;
+                        if (CFG.debug) console.log(`[服务器监控] 服务器 "${serverName}" 存在缺失数据`);
+                    }
+
+                    return `
+                    <div class="wp-co-server-card ${online ? '' : 'offline'}">
+                        <div class="wp-co-server-header">
+                            <div class="wp-co-server-name">
+                                <span class="wp-co-status-indicator" style="background-color: ${statusColor};"></span>
+                                ${serverName}
+                            </div>
+                            <div class="wp-co-server-region">${region}</div>
+                        </div>
+
+                        <div class="wp-co-cpu-container">
+                            <div class="wp-co-cpu-label">
+                                <span>CPU 使用率</span>
+                                <span style="font-weight: 500;">${cpuUsage.toFixed(1)}%</span>
+                            </div>
+                            <div class="wp-co-cpu-bar-wrap">
+                                <div class="wp-co-cpu-bar" style="width: ${cpuUsage}%; background-color: ${statusColor};"></div>
+                            </div>
+                        </div>
+
+                        <div class="wp-co-section-title">系统配置</div>
+                        <div class="wp-co-info-grid">
+                            <div class="wp-co-info-item">
+                                <div class="wp-co-info-label">操作系统</div>
+                                <div>${os === "未知系统" ? `<span class="wp-co-unknown-data">${os}</span>` : os}</div>
+                            </div>
+                            <div class="wp-co-info-item">
+                                <div class="wp-co-info-label">CPU信息</div>
+                                <div>${cpu === "未知CPU信息" ? `<span class="wp-co-unknown-data">${cpu}</span>` : cpu}</div>
+                            </div>
+                            <div class="wp-co-info-item">
+                                <div class="wp-co-info-label">架构</div>
+                                <div>${arch === "未知架构" ? `<span class="wp-co-unknown-data">${arch}</span>` : arch}</div>
+                            </div>
+                        </div>
+
+                        <div class="wp-co-section-title">实时性能</div>
+                        <div class="wp-co-info-grid">
+                            <div class="wp-co-info-item">
+                                <div class="wp-co-info-label">内存使用率</div>
+                                <div>${memUsage}</div>
+                            </div>
+                            <div class="wp-co-info-item">
+                                <div class="wp-co-info-label">磁盘使用率</div>
+                                <div>${diskUsage}</div>
+                            </div>
+                            <div class="wp-co-info-item">
+                                <div class="wp-co-info-label">网络上传</div>
+                                <div>${netOut} (${trafficOut})</div>
+                            </div>
+                            <div class="wp-co-info-item">
+                                <div class="wp-co-info-label">网络下载</div>
+                                <div>${netIn} (${trafficIn})</div>
+                            </div>
+                        </div>
+
+                        <div class="wp-co-footer-stats">
+                            <div>TCP连接: ${tcpConn === "未知" ? `<span class="wp-co-unknown-data">${tcpConn}</span>` : tcpConn}</div>
+                            <div>进程数: ${processCount === "未知" ? `<span class="wp-co-unknown-data">${processCount}</span>` : processCount} | 运行: ${uptime === "未知" ? `<span class="wp-co-unknown-data">${uptime}</span>` : uptime}</div>
+                        </div>
+                    </div>
+                `;
+                }).join('');
+
+                showWarning(hasMissingData);
+            }
+        }
+
+        /* ===================== 数据请求 ===================== */
+        async function fetchServers() {
+            if (isLoading) return;
+            isLoading = true;
+
+            const statusEl = document.getElementById(IDS.status);
+            let hadError = false;
+
+            if (statusEl) {
+                statusEl.innerHTML = `
+                <i class="fa fa-refresh fa-spin"></i>
+                加载中...
+            `;
+            }
+
+            if (CFG.debug) console.log(`[服务器监控] 开始请求数据: ${CFG.api}`);
+            showError(false);
+            showWarning(false);
+
+            try {
+                const response = await fetch(CFG.api, { cache: 'no-store' });
+
+                if (!response.ok) {
+                    hadError = true;
+                    console.error(`[服务器监控] 请求失败: HTTP状态码 ${response.status}`);
+                    if (servers.length === 0) throw new Error(`HTTP状态错误: ${response.status}`);
+                } else {
+                    if (CFG.debug) console.log(`[服务器监控] 请求成功: ${response.status}`);
+                    const rawData = await response.text();
+                    let parsedData = null;
+                    try {
+                        parsedData = JSON.parse(rawData);
+                        if (CFG.debug) console.log(`[服务器监控] 数据解析成功`);
+                    } catch (e) {
+                        hadError = true;
+                        console.error(`[服务器监控] 数据解析失败:`, e);
+                        if (servers.length === 0) throw new Error("数据解析失败");
+                    }
+
+                    if (parsedData) {
+                        let newServers = [];
+                        if (parsedData?.state && parsedData?.host) {
+                            newServers = [parsedData];
+                        } else if (parsedData?.servers) {
+                            newServers = parsedData.servers;
+                        } else if (parsedData?.list || parsedData?.data) {
+                            newServers = parsedData.list || parsedData.data;
+                        }
+
+                        if (newServers.length > 0) {
+                            servers = newServers;
+                            hadError = false;
+                            if (CFG.debug) console.log(`[服务器监控] 获取到 ${newServers.length} 台服务器数据`);
+                        } else {
+                            hadError = true;
+                            console.log(`[服务器监控] 未获取到有效服务器数据`);
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error(`[服务器监控] 数据请求错误:`, error);
+                hadError = true;
+                if (servers.length === 0) servers = [];
+            } finally {
+                renderServers();
+                isLoading = false;
+                if (CFG.debug) console.log(`[服务器监控] 数据处理完成`);
+            }
+        }
+
+        /* ===================== 初始化 ===================== */
+        function init() {
+            injectStyles();
+            if (!createBaseStructure()) {
+                setTimeout(init, 1000);
+                return;
+            }
+            fetchServers();
+            setInterval(fetchServers, CFG.poll);
+        }
+
+        init();
+    })();
+</script>
